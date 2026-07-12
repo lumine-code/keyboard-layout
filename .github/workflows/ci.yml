@@ -17,8 +17,8 @@ jobs:
           - macos-latest
           - windows-latest
         node_version:
-          - 16
           - 20
+          - 24
     steps:
       - uses: actions/checkout@v4
 
