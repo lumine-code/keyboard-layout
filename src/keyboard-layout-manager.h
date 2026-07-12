@@ -2,7 +2,6 @@
 #define SRC_KEYBORD_LAYOUT_OBSERVER_H_
 
 #include "napi.h"
-#include <uv.h>
 
 #define CHECK(cond, msg, env)                                  \
 if (!(cond)) {                                                 \
@@ -30,7 +29,10 @@ if (!(cond)) {                                                 \
 #include <X11/Xlib.h>
 #include <string>
 
-#ifdef HAS_WAYLAND
+#if HAS_WAYLAND
+#include <atomic>
+#include <mutex>
+#include <thread>
 #include <wayland-client.h>
 #include <xkbcommon/xkbcommon.h>
 
@@ -65,9 +67,9 @@ public:
   Napi::Env _env;
 #if defined(__linux__) || defined(__FreeBSD__)
   void ProcessCallbackWrapper();
-
-#ifdef HAS_WAYLAND
   bool isWayland;
+
+#if HAS_WAYLAND
   WaylandKeymapContext *waylandContext;
 #endif // HAS_WAYLAND
 
@@ -90,9 +92,10 @@ private:
   XIC xInputContext;
   XIM xInputMethod;
 
-#ifdef HAS_WAYLAND
-  uv_poll_t* waylandPoll;
-  static void OnWaylandEvent(uv_poll_t* handle, int status, int events);
+#if HAS_WAYLAND
+  std::atomic<bool> waylandPolling{false};
+  std::mutex waylandMutex;
+  std::thread waylandPollThread;
   void SetupWaylandPolling();
   void CleanupWaylandPolling();
 #endif // HAS_WAYLAND

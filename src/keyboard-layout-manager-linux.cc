@@ -19,9 +19,10 @@
 #define USE_XIC 0
 
 // Wayland-only block begins…
-#ifdef HAS_WAYLAND
+#if HAS_WAYLAND
 
 #include <optional>
+#include <poll.h>
 
 // Enumerates the various modifiers on this keyboard and tests which one brings
 // us to Level 3. This correlates to what we expect from the AltGr key.
@@ -235,21 +236,36 @@ static const struct wl_keyboard_listener keyboard_listener = {
     keyboard_key,    keyboard_modifiers, keyboard_repeat_info};
 
 static void CleanupWaylandContext(WaylandKeymapContext *ctx) {
-  if (ctx->xkb_state)
+  if (!ctx)
+    return;
+  if (ctx->xkb_state) {
     xkb_state_unref(ctx->xkb_state);
-  if (ctx->xkb_keymap)
+    ctx->xkb_state = nullptr;
+  }
+  if (ctx->xkb_keymap) {
     xkb_keymap_unref(ctx->xkb_keymap);
-  if (ctx->xkb_context)
+    ctx->xkb_keymap = nullptr;
+  }
+  if (ctx->xkb_context) {
     xkb_context_unref(ctx->xkb_context);
-  if (ctx->keyboard)
+    ctx->xkb_context = nullptr;
+  }
+  if (ctx->keyboard) {
     wl_keyboard_destroy(ctx->keyboard);
-  if (ctx->seat)
+    ctx->keyboard = nullptr;
+  }
+  if (ctx->seat) {
     wl_seat_destroy(ctx->seat);
-  if (ctx->registry)
+    ctx->seat = nullptr;
+  }
+  if (ctx->registry) {
     wl_registry_destroy(ctx->registry);
+    ctx->registry = nullptr;
+  }
   if (ctx->display) {
     wl_display_roundtrip(ctx->display);
     wl_display_disconnect(ctx->display);
+    ctx->display = nullptr;
   }
 }
 
@@ -315,61 +331,34 @@ void KeyboardLayoutManager::SetupWaylandPolling() {
 
   int fd = wl_display_get_fd(waylandContext->display);
 
-  waylandPoll = new uv_poll_t;
-  waylandPoll->data = this;
+  waylandPolling = true;
+  waylandPollThread = std::thread([this, fd]() {
+    struct pollfd descriptor = {fd, POLLIN, 0};
+    while (waylandPolling) {
+      descriptor.revents = 0;
+      int status = poll(&descriptor, 1, 200);
+      if (!waylandPolling)
+        break;
+      if (status <= 0 || !(descriptor.revents & POLLIN))
+        continue;
 
-  uv_poll_init(uv_default_loop(), waylandPoll, fd);
-  uv_poll_start(waylandPoll, UV_READABLE, OnWaylandEvent);
-
-  // Unref the handles so they don't prevent process exit.
-  uv_unref((uv_handle_t *)waylandPoll);
-}
-
-void KeyboardLayoutManager::OnWaylandEvent(uv_poll_t *handle, int status,
-                                           int events) {
-#ifdef DEBUG
-  std::cout << "OnWaylandEvent!" << std::endl;
-#endif
-  KeyboardLayoutManager *instance =
-      static_cast<KeyboardLayoutManager *>(handle->data);
-  if (status < 0) {
-    // Error occurred
-#ifdef DEBUG
-    std::cout << "Error! " << status << std::endl;
-#endif
-    return;
-  }
-
-  if (events & UV_READABLE) {
-#ifdef DEBUG
-    std::cout << "Dispatching pending events…" << std::endl;
-#endif
-    while (wl_display_prepare_read(instance->waylandContext->display) != 0) {
-      wl_display_dispatch_pending(instance->waylandContext->display);
+      std::lock_guard<std::mutex> lock(waylandMutex);
+      if (!waylandContext || !waylandContext->display)
+        break;
+      while (wl_display_prepare_read(waylandContext->display) != 0) {
+        wl_display_dispatch_pending(waylandContext->display);
+      }
+      if (wl_display_read_events(waylandContext->display) < 0)
+        continue;
+      wl_display_dispatch_pending(waylandContext->display);
     }
-    // Now read events (shouldn't block since we've been notified data is
-    // available).
-    if (wl_display_read_events(instance->waylandContext->display) < 0) {
-#ifdef DEBUG
-    std::cout << "Error reading events…" << strerror(errno) << std::endl;
-#endif
-      return;
-    }
-    // Dispatch the events we just read.
-#ifdef DEBUG
-    std::cout << "Dispatching pending events…" << std::endl;
-#endif
-    wl_display_dispatch_pending(instance->waylandContext->display);
-  }
+  });
 }
 
 void KeyboardLayoutManager::CleanupWaylandPolling() {
-  if (waylandPoll) {
-    uv_poll_stop(waylandPoll);
-    uv_close((uv_handle_t *)waylandPoll,
-             [](uv_handle_t *handle) { delete (uv_poll_t *)handle; });
-    waylandPoll = nullptr;
-  }
+  waylandPolling = false;
+  if (waylandPollThread.joinable())
+    waylandPollThread.join();
 }
 
 #endif // HAS_WAYLAND
@@ -377,7 +366,7 @@ void KeyboardLayoutManager::CleanupWaylandPolling() {
 void KeyboardLayoutManager::PlatformSetup(const Napi::CallbackInfo &info) {
   auto env = info.Env();
 
-#ifdef HAS_WAYLAND
+#if HAS_WAYLAND
   // When we're compiled with Wayland support, assume we're on Wayland to start
   // out, and revert to the X11 approach only if we fail to obtain a keymap via
   // Wayland APIs.
@@ -476,9 +465,11 @@ x11:
 }
 
 void KeyboardLayoutManager::PlatformTeardown() {
-#ifdef HAS_WAYLAND
+#if HAS_WAYLAND
   CleanupWaylandPolling();
   CleanupWaylandContext(waylandContext);
+  delete waylandContext;
+  waylandContext = nullptr;
 #endif
   callback.Reset();
 };
@@ -490,7 +481,8 @@ Napi::Value KeyboardLayoutManager::GetCurrentKeyboardLayout(
   Napi::Value result;
 
   if (isWayland) {
-#ifdef HAS_WAYLAND
+#if HAS_WAYLAND
+    std::lock_guard<std::mutex> lock(waylandMutex);
     if (!waylandContext || !waylandContext->xkb_keymap ||
         !waylandContext->xkb_state) {
       return env.Null();
@@ -608,7 +600,8 @@ KeyboardLayoutManager::GetCurrentKeymap(const Napi::CallbackInfo &info) {
 
   if (isWayland) {
 
-#ifdef HAS_WAYLAND
+#if HAS_WAYLAND
+    std::lock_guard<std::mutex> lock(waylandMutex);
     size_t keyCodeMapSize = sizeof(keyCodeMap) / sizeof(keyCodeMap[0]);
     for (size_t i = 0; i < keyCodeMapSize; i++) {
       const char *dom3Code = keyCodeMap[i].dom3Code;
