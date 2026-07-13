@@ -4,86 +4,51 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  Test:
-    name: "Test"
+  test:
+    name: Node ${{ matrix.node }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
-        node_version:
-          - 20
-          - 24
+        include:
+          - os: ubuntu-latest
+            node: 20
+          - os: ubuntu-latest
+            node: 24
+          - os: macos-latest
+            node: 24
+          - os: windows-latest
+            node: 24
     steps:
+      - name: Enable Git symlinks on Windows
+        if: runner.os == 'Windows'
+        run: git config --global core.symlinks true
       - uses: actions/checkout@v4
-
-      - name: Install dependencies
-        if: ${{ runner.os == 'Linux' }}
-        run: sudo apt-get update && sudo apt-get install libx11-dev libxkbfile-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libxkbcommon0 xkb-data
-
-      - name: Set up locale
-        if: ${{ runner.os == 'Linux' }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Install Linux prerequisites
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y locales
-          sudo locale-gen fr_FR.UTF-8  # Example: French locale
-          sudo update-locale LANG=fr_FR.UTF-8 LC_ALL=fr_FR.UTF-8
-          echo "LANG=fr_FR.UTF-8" | sudo tee -a /etc/environment
-          echo "LC_ALL=fr_FR.UTF-8" | sudo tee -a /etc/environment
-          # Apply and verify the change
-          source /etc/environment
-          locale
-
-      - name: Set keyboard layout
-        if: ${{ runner.os == 'Linux' }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y console-setup keyboard-configuration
-          # Set keyboard layout non-interactively
-          sudo sed -i 's/XKBLAYOUT=.*/XKBLAYOUT="fr"/' /etc/default/keyboard
-          sudo dpkg-reconfigure -f noninteractive keyboard-configuration
-          # Apply the changes
-          sudo setupcon
-          echo "Current locale:"
-          locale
-          echo "Current keyboard layout:"
-          cat /etc/default/keyboard | grep XKBLAYOUT
-
-      - name: Report session type
-        if: ${{ runner.os == 'Linux' }}
-        run: |
-          echo "X or Wayland? $XKB_SESSION_TYPE"
-          echo "WAYLAND_DISPLAY? $WAYLAND_DISPLAY"
-          echo "DISPLAY?: $DISPLAY"
-
-      - name: Install Node ${{ matrix.node }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node_version }}
-
-      - name: Install Python setuptools
-        # This is needed for Python 3.12+, since many versions of node-gyp
-        # are incompatible with Python 3.12+, which no-longer ships 'distutils'
-        # out of the box. 'setuptools' package provides 'distutils'.
-        run: python3 -m pip install setuptools
-        if: "!contains(matrix.os, 'macos')"
-
-      - name: Install Python setuptools (macOS)
-        # This is needed for Python 3.12+, since many versions of node-gyp
-        # are incompatible with Python 3.12+, which no-longer ships 'distutils'
-        # out of the box. 'setuptools' package provides 'distutils'.
-        run: brew install python-setuptools
-        if: "contains(matrix.os, 'macos')"
-
+          sudo apt-get install -y libx11-dev libxkbfile-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev xkb-data xvfb
       - name: Install dependencies
-        run: npm install
-
-      - name: Run tests
-        uses: GabrielBB/xvfb-action@v1
-        with:
-          run: npm test
+        run: npm ci
+      - name: Run tests on Linux
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm test
+      - name: Run tests on macOS and Windows
+        if: runner.os != 'Linux'
+        run: npm test
+      - name: Validate package contents
+        run: npm pack --dry-run

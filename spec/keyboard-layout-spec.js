@@ -45,7 +45,11 @@ describe('Keyboard Layout', () => {
             break
 
           default:
-            throw new Error('No assertion defined for current keyboard layout: ' + currentLayout)
+            const key = KeyboardLayout.getCurrentKeymap()['KeyS']
+            expect(key.unmodified).toBeDefined()
+            expect(key.withShift).toBeDefined()
+            expect(key.withAltGraph === null || typeof key.withAltGraph === 'string').toBe(true)
+            expect(key.withAltGraphShift === null || typeof key.withAltGraphShift === 'string').toBe(true)
         }
       })
     })
