@@ -33,8 +33,8 @@ jobs:
       - name: Enable Git symlinks on Windows
         if: runner.os == 'Windows'
         run: git config --global core.symlinks true
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node }}
       - name: Install Linux prerequisites
