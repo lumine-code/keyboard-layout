@@ -14,11 +14,11 @@
     "access": "public"
   },
   "dependencies": {
-    "event-kit": "^2.0.0",
-    "node-addon-api": "^7.1.1"
+    "event-kit": "^2.5.3",
+    "node-addon-api": "^8.9.0"
   },
   "devDependencies": {
-    "jasmine-focused": "^1.0.4",
+    "@lumine-code/jasmine-focused": "https://github.com/lumine-code/jasmine-focused.git#6d04426bcb107dc44b148a6d48172c918326c068",
     "node-gyp": "12.4.0"
   }
 }
