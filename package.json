@@ -1,22 +1,22 @@
 {
-  "name": "@pulsar-edit/keyboard-layout",
-  "version": "3.0.5",
-  "description": "Read and observe the current keyboard layout on OS X.",
+  "name": "@lumine-code/keyboard-layout",
+  "version": "4.0.0",
+  "description": "Read and observe the current keyboard layout on Windows, macOS, and Linux.",
   "main": "./lib/keyboard-layout",
   "scripts": {
     "test": "jasmine-focused --captureExceptions --forceexit spec"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/pulsar-edit/keyboard-layout.git"
+    "url": "https://github.com/lumine-code/keyboard-layout.git"
   },
   "bugs": {
-    "url": "https://github.com/pulsar-edit/keyboard-layout/issues"
+    "url": "https://github.com/lumine-code/keyboard-layout/issues"
   },
   "licenses": [
     {
       "type": "MIT",
-      "url": "http://github.com/pulsar-edit/keyboard-layout/raw/master/LICENSE.md"
+      "url": "https://github.com/lumine-code/keyboard-layout/raw/master/LICENSE.md"
     }
   ],
   "dependencies": {
