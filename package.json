@@ -5,7 +5,7 @@
   "description": "Reads and observes the current keyboard layout on Windows, macOS, and Linux.",
   "main": "./lib/keyboard-layout",
   "scripts": {
-    "test": "jasmine-focused --captureExceptions --forceexit spec"
+    "test": "jasmine"
   },
   "repository": "https://github.com/lumine-code/keyboard-layout",
   "bugs": "https://github.com/lumine-code/keyboard-layout/issues",
@@ -18,7 +18,7 @@
     "node-addon-api": "^8.9.0"
   },
   "devDependencies": {
-    "@lumine-code/jasmine-focused": "https://github.com/lumine-code/jasmine-focused.git#6d04426bcb107dc44b148a6d48172c918326c068",
+    "jasmine": "^6.3.0",
     "node-gyp": "12.4.0"
   }
 }

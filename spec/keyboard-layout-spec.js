@@ -67,8 +67,8 @@ describe('Keyboard Layout', () => {
         const callback = jasmine.createSpy('observeCurrentKeyboardLayout')
         const disposable = KeyboardLayout.observeCurrentKeyboardLayout(callback)
         disposable.dispose()
-        expect(callback.callCount).toBe(1)
-        const layout = callback.argsForCall[0][0]
+        expect(callback).toHaveBeenCalledTimes(1)
+        const layout = callback.calls.argsFor(0)[0]
         expect(typeof layout).toBe('string')
         expect(layout.length).toBeGreaterThan(0)
       })
