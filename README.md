@@ -1,4 +1,4 @@
-# @lumine-code/keyboard-layout
+# keyboard-layout
 
 Reads and observes the current keyboard layout on Windows, macOS, and Linux.
 
