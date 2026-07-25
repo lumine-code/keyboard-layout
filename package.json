@@ -3,6 +3,16 @@
   "author": "lumine-code",
   "version": "4.0.0",
   "description": "Reads and observes the current keyboard layout on Windows, macOS, and Linux.",
+  "keywords": [
+    "keyboard",
+    "layout",
+    "keymap",
+    "native",
+    "wayland",
+    "x11",
+    "cross-platform",
+    "lumine"
+  ],
   "main": "./lib/keyboard-layout",
   "scripts": {
     "test": "jasmine"
