@@ -29,6 +29,6 @@
   },
   "devDependencies": {
     "jasmine": "^6.3.0",
-    "node-gyp": "12.4.0"
+    "node-gyp": "13.0.1"
   }
 }
