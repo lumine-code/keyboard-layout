@@ -40,6 +40,14 @@ jobs:
       - uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
+      # npm ci compiles the addon through binding.gyp, so the X11 and xkb
+      # headers have to be here before it runs — on every leg, not just the
+      # cpp one, or the JavaScript job fails in the same place.
+      - name: Install Linux prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxkbfile-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev xkb-data
       - run: npm ci
       # cpp analysis only reports on code it watches being compiled, and the
       # step between init and analyze is the one place that happens. Build
