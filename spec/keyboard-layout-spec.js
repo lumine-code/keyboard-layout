@@ -106,7 +106,7 @@ describe("Keyboard Layout", () => {
 
   // Smoke tests on Linux
   if (process.platform === "linux") {
-    describe(".getCurrentKeymap()", function () {
+    describe(".getCurrentKeymap() on Linux", function () {
       it("returns a keymap with unmodified and shift-modified keys without blowing up (basic smoke test)", function () {
         const keymap = KeyboardLayout.getCurrentKeymap();
         console.log("KEYMAP:", keymap);
@@ -115,7 +115,7 @@ describe("Keyboard Layout", () => {
       });
     });
 
-    describe(".getCurrentKeyboardLayout()", function () {
+    describe(".getCurrentKeyboardLayout() on Linux", function () {
       it("returns an identifier for the current keyboard layout (basic smoke test)", function () {
         let layout = KeyboardLayout.getCurrentKeyboardLayout();
         console.warn("Linux keyboard layout:", layout);
