@@ -1,7 +1,7 @@
 {
   "name": "@lumine-code/keyboard-layout",
   "author": "lumine-code",
-  "version": "4.0.0",
+  "version": "1.0.0",
   "description": "Reads and observes the current keyboard layout on Windows, macOS, and Linux.",
   "keywords": [
     "keyboard",
