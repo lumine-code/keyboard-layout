@@ -2,6 +2,8 @@
 
 Reads and observes the current keyboard layout on Windows, macOS, and Linux.
 
+Fork of [pulsar-edit/keyboard-layout](https://github.com/pulsar-edit/keyboard-layout).
+
 ## Features
 
 - **Cross-platform layouts**: reports the active layout on Windows, macOS, X11, and Wayland.
