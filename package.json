@@ -26,7 +26,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@lumine-code/event-kit": "github:lumine-code/event-kit#3625f18ec2ed875ad47251ff9b94ac26f41680a0",
+    "@lumine-code/event-kit": "github:lumine-code/event-kit#6d44057260c44255151e8d4b8e453e009f0990c4",
     "node-addon-api": "^8.9.2"
   },
   "devDependencies": {
