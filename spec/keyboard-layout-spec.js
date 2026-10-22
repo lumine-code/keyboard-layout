@@ -106,6 +106,43 @@ describe("Keyboard Layout", () => {
 
   // Smoke tests on Linux
   if (process.platform === "linux") {
+    it("exits cleanly after Wayland setup falls back to X11", function () {
+      const fs = require("node:fs");
+      const os = require("node:os");
+      const path = require("node:path");
+      const { spawnSync } = require("node:child_process");
+      const runtimeDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "keyboard-layout-x11-"));
+      fs.chmodSync(runtimeDirectory, 0o700);
+      const modulePath = require.resolve("../lib/keyboard-layout");
+      try {
+        // No compositor socket exists here. Every fresh native environment
+        // must release its failed Wayland context before exiting through X11.
+        for (let iteration = 0; iteration < 6; iteration++) {
+          const result = spawnSync(
+            process.execPath,
+            [
+              "-e",
+              `const layout = require(${JSON.stringify(modulePath)}); if (!layout.getCurrentKeymap().KeyG) process.exitCode = 1;`,
+            ],
+            {
+              env: {
+                ...process.env,
+                XDG_RUNTIME_DIR: runtimeDirectory,
+                WAYLAND_DISPLAY: "missing-compositor",
+              },
+              encoding: "utf8",
+              timeout: 10000,
+            },
+          );
+          expect(result.error).toBeUndefined();
+          expect(result.signal).toBeNull();
+          expect(result.status).withContext(result.stderr).toBe(0);
+        }
+      } finally {
+        fs.rmdirSync(runtimeDirectory);
+      }
+    });
+
     describe(".getCurrentKeymap() on Linux", function () {
       it("returns a keymap with unmodified and shift-modified keys without blowing up (basic smoke test)", function () {
         const keymap = KeyboardLayout.getCurrentKeymap();

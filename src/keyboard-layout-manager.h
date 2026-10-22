@@ -67,10 +67,10 @@ public:
   Napi::Env _env;
 #if defined(__linux__) || defined(__FreeBSD__)
   void ProcessCallbackWrapper();
-  bool isWayland;
+  bool isWayland = false;
 
 #if HAS_WAYLAND
-  WaylandKeymapContext *waylandContext;
+  WaylandKeymapContext *waylandContext = nullptr;
 #endif // HAS_WAYLAND
 
 #endif // __linux__ || __FreeBSD__

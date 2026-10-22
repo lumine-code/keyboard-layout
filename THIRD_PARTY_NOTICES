@@ -1,6 +1,7 @@
 ----- BEGIN THIRD-PARTY LICENSE: upstream:pulsar-edit_keyboard-layout -----
 Source: https://github.com/pulsar-edit/keyboard-layout
 Revision: 5479e36f17b40fc38b29ee1627ff172f77e089e3
+Additional source revision: 686489a2dd7caa92f29ccabe9005f66850a8c1af (defensive Wayland state initialization; the current thread lifecycle already safely handles X11 fallback).
 
 Original file: LICENSE.md
 
