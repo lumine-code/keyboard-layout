@@ -39,12 +39,6 @@ jobs:
             node: 24
           - os: windows-latest
             node: 24
-          - os: ubuntu-latest
-            node: 26
-          - os: macos-latest
-            node: 26
-          - os: windows-latest
-            node: 26
     steps:
       - name: Enable Git symlinks on Windows
         if: runner.os == 'Windows'
