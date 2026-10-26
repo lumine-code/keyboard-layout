@@ -1,43 +1,25 @@
 #undef _WIN32_WINNT
-#define _WIN32_WINNT 0x0601
+#define _WIN32_WINNT 0x0A00
 
 #undef WINVER
-#define WINVER 0x0601
-
-#define SPACE_SCAN_CODE 0x0039
+#define WINVER 0x0A00
 
 #include "keyboard-layout-manager.h"
 
 #include <string>
 #include <cwctype>
+#include <vector>
 #include <windows.h>
 
 using namespace Napi;
 
-std::string ToUTF8(const std::wstring& string) {
-  if (string.length() < 1) {
-    return std::string();
-  }
-
-  // NB: In the pathological case, each character could expand up
-  // to 4 bytes in UTF8.
-  int cbLen = (string.length()+1) * sizeof(char) * 4;
-  char* buf = new char[cbLen];
-  int retLen = WideCharToMultiByte(
-    CP_UTF8,
-    0,
-    string.c_str(),
-    -1,
-    buf,
-    cbLen,
-    NULL,
-    NULL
-  );
-  buf[retLen] = 0;
-
-  std::string ret;
-  ret.assign(buf);
-  return ret;
+Napi::Value LanguageForLayout(Napi::Env env, HKL layout) {
+  wchar_t name[LOCALE_NAME_MAX_LENGTH] = {};
+  const LANGID language = LOWORD(reinterpret_cast<UINT_PTR>(layout));
+  const int length = LCIDToLocaleName(
+    MAKELCID(language, SORT_DEFAULT), name, LOCALE_NAME_MAX_LENGTH, 0);
+  if (length <= 1) return env.Null();
+  return Napi::String::New(env, reinterpret_cast<const char16_t*>(name), length - 1);
 }
 
 HKL GetForegroundWindowHKL() {
@@ -51,11 +33,14 @@ HKL GetForegroundWindowHKL() {
 
 Napi::Value KeyboardLayoutManager::GetCurrentKeyboardLayout(const Napi::CallbackInfo& info) {
   auto env = info.Env();
-  Napi::HandleScope scope(env);
-
-  ActivateKeyboardLayout(GetForegroundWindowHKL(), 0);
-  char layoutName[KL_NAMELENGTH];
-  if (::GetKeyboardLayoutName(layoutName)) {
+  CHECK(!disposed.load(), "Keyboard layout manager has been disposed", env);
+  const HKL current = GetKeyboardLayout(0);
+  const HKL foreground = GetForegroundWindowHKL();
+  if (current != foreground && !ActivateKeyboardLayout(foreground, 0)) return env.Null();
+  char layoutName[KL_NAMELENGTH] = {};
+  const BOOL success = ::GetKeyboardLayoutNameA(layoutName);
+  if (current != foreground) ActivateKeyboardLayout(current, 0);
+  if (success) {
     return Napi::String::New(env, layoutName);
   } else {
     return env.Null();
@@ -64,40 +49,24 @@ Napi::Value KeyboardLayoutManager::GetCurrentKeyboardLayout(const Napi::Callback
 
 Napi::Value KeyboardLayoutManager::GetCurrentKeyboardLanguage(const Napi::CallbackInfo& info) {
   auto env = info.Env();
-  Napi::HandleScope scope(env);
-
-  HKL layout = GetForegroundWindowHKL();
-
-  wchar_t buf[LOCALE_NAME_MAX_LENGTH];
-  std::wstring wstr;
-  LCIDToLocaleName(MAKELCID((UINT)layout & 0xFFFF, SORT_DEFAULT), buf, LOCALE_NAME_MAX_LENGTH, 0);
-  wstr.assign(buf);
-
-  std::string str = ToUTF8(wstr);
-  return Napi::String::New(env, str.data(), str.size());
+  CHECK(!disposed.load(), "Keyboard layout manager has been disposed", env);
+  return LanguageForLayout(env, GetForegroundWindowHKL());
 }
 
 Napi::Value KeyboardLayoutManager::GetInstalledKeyboardLanguages(const Napi::CallbackInfo& info) {
   auto env = info.Env();
-  Napi::HandleScope scope(env);
+  CHECK(!disposed.load(), "Keyboard layout manager has been disposed", env);
+  const int capacity = GetKeyboardLayoutList(0, nullptr);
+  Napi::Array result = Napi::Array::New(env);
+  if (capacity <= 0) return result;
+  std::vector<HKL> layouts(capacity);
+  const int layoutCount = GetKeyboardLayoutList(capacity, layouts.data());
 
-  int layoutCount = GetKeyboardLayoutList(0, NULL);
-  HKL* layouts = new HKL[layoutCount];
-  GetKeyboardLayoutList(layoutCount, layouts);
-
-  Napi::Array result = Napi::Array::New(env, layoutCount);
-  wchar_t buf[LOCALE_NAME_MAX_LENGTH];
-
-  for (int i=0; i < layoutCount; i++) {
-    std::wstring wstr;
-    LCIDToLocaleName(MAKELCID((UINT)layouts[i] & 0xFFFF, SORT_DEFAULT), buf, LOCALE_NAME_MAX_LENGTH, 0);
-    wstr.assign(buf);
-
-    std::string str = ToUTF8(wstr);
-    result.Set(i, Napi::String::New(env, str.data(), str.size()));
+  uint32_t index = 0;
+  for (int i = 0; i < layoutCount; i++) {
+    Napi::Value language = LanguageForLayout(env, layouts[i]);
+    if (language.IsString()) result.Set(index++, language);
   }
-
-  delete[] layouts;
   return result;
 }
 
@@ -138,36 +107,13 @@ Napi::Value CharacterForNativeCode(
     keyboardState[VK_CONTROL] = 0x80;
   }
 
-  wchar_t characters[5];
-  int count = ToUnicodeEx(keyCode, scanCode, keyboardState, characters, 5, 0, keyboardLayout);
+  wchar_t characters[8] = {};
+  // Windows 10 1607+: inspect the layout without consuming or installing a
+  // pending dead key in the caller's keyboard state (bit 2).
+  const int count = ToUnicodeEx(keyCode, scanCode, keyboardState, characters, 8, 4, keyboardLayout);
 
-  // The check to detect and skip running this function for dead keys does not
-  // account for modifier state. For layouts that map dead keys to AltGraph or
-  // Shift-AltGraph we still have to detect and clear the key out of the
-  // kernel-mode keyboard buffer so the keymap for subsequent keys is correctly
-  // translated and not affected by the dead key.
-  if (count == -1) { // Dead key
-    // Dead keys are not cleared if both AltGraph and Shift is held down so
-    // we clear this keyboard state to ensure that it is cleared correctly.
-    keyboardState[VK_SHIFT] = 0x0;
-    keyboardState[VK_MENU] = 0x0;
-    keyboardState[VK_CONTROL] = 0x0;
-
-    // Clear dead key out of kernel-mode keyboard buffer so subsequent
-    // translations are not affected.
-    UINT spaceKeyCode = MapVirtualKeyEx(SPACE_SCAN_CODE, MAPVK_VSC_TO_VK, keyboardLayout);
-    ToUnicodeEx(spaceKeyCode, SPACE_SCAN_CODE, keyboardState, characters, 5, 0, keyboardLayout);
-
-    // Don't translate dead keys.
-    return env.Null();
-  } else if (count > 0 && !std::iswcntrl(characters[0])) {
-    int utf8Len = WideCharToMultiByte(CP_UTF8, 0, characters, count, NULL, 0, NULL, NULL);
-    if (utf8Len == 0) {
-      return env.Null();
-    }
-    std::string utf8(utf8Len, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, characters, count, &utf8[0], utf8Len, NULL, NULL);
-    return Napi::String::New(env, utf8);
+  if (count > 0 && count <= 8 && !std::iswcntrl(characters[0])) {
+    return Napi::String::New(env, reinterpret_cast<const char16_t*>(characters), count);
   } else {
     return env.Null();
   }
@@ -175,6 +121,7 @@ Napi::Value CharacterForNativeCode(
 
 Napi::Value KeyboardLayoutManager::GetCurrentKeymap(const Napi::CallbackInfo& info) {
   auto env = info.Env();
+  CHECK(!disposed.load(), "Keyboard layout manager has been disposed", env);
   BYTE keyboardState[256];
   HKL keyboardLayout = GetForegroundWindowHKL();
 
@@ -188,17 +135,7 @@ Napi::Value KeyboardLayoutManager::GetCurrentKeymap(const Napi::CallbackInfo& in
     if (dom3Code && scanCode > 0x0000) {
       UINT keyCode = MapVirtualKeyEx(scanCode, MAPVK_VSC_TO_VK, keyboardLayout);
 
-      // Detect and skip dead keys. If the most significant bit of the returned
-      // character value is 1, this is a dead key. Trying to translate it to a
-      // character will mutate the Windows keyboard buffer and blow away
-      // pending dead keys. To avoid this bug, we just refuse to map dead keys
-      // to characters.
-      if (
-        (MapVirtualKeyEx(keyCode, MAPVK_VK_TO_CHAR, keyboardLayout) >>
-        (sizeof(UINT) * 8 - 1))
-      ) {
-        continue;
-      }
+      if (keyCode == 0) continue;
 
       Napi::String dom3CodeKey = Napi::String::New(env, dom3Code);
       Napi::Value unmodified = CharacterForNativeCode(env, keyboardLayout, keyCode, scanCode, keyboardState, false, false);

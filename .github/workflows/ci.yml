@@ -52,7 +52,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libx11-dev libxkbfile-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev xkb-data xvfb
+          sudo apt-get install -y libx11-dev libxkbfile-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev xkb-data x11-xkb-utils xvfb
       - name: Install dependencies
         run: npm ci
       - name: Run tests on Linux
@@ -63,3 +63,13 @@ jobs:
         run: npm test
       - name: Validate package contents
         run: npm pack --dry-run
+      # Match the Electron version currently used by Lumine. The Node-API
+      # addon built above must also survive real renderer environment teardown.
+      - name: Install Electron for renderer lifecycle tests
+        run: npm install --prefix "${{ runner.temp }}/keyboard-layout-electron" --no-save --no-package-lock --no-audit --no-fund electron@45.0.0
+      - name: Test Electron renderer reloads on Linux
+        if: runner.os == 'Linux'
+        run: xvfb-run -a node "${{ runner.temp }}/keyboard-layout-electron/node_modules/electron/cli.js" spec/electron-smoke.js --no-sandbox
+      - name: Test Electron renderer reloads on macOS and Windows
+        if: runner.os != 'Linux'
+        run: node "${{ runner.temp }}/keyboard-layout-electron/node_modules/electron/cli.js" spec/electron-smoke.js

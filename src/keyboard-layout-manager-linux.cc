@@ -4,19 +4,16 @@
 #include <X11/Xutil.h>
 #include <X11/extensions/XKBrules.h>
 #include <cctype>
-#include <cwctype>
-#include <locale.h>
-#include <stdio.h>
+#include <cerrno>
+#include <chrono>
+#include <climits>
+#include <cstdlib>
 #include <sys/mman.h>
 #include <unistd.h>
 
 #ifdef DEBUG
 #include <iostream>
 #endif
-
-// Whether to check XInputContext when trying to match up a keyboard key with
-// a character.
-#define USE_XIC 0
 
 // Wayland-only block begins…
 #if HAS_WAYLAND
@@ -29,13 +26,16 @@
 static std::optional<size_t> IndexOfLevel3Modifier(WaylandKeymapContext* ctx) {
   if (!ctx->xkb_keymap) return std::nullopt;
   struct xkb_state *state = xkb_state_new(ctx->xkb_keymap);
+  if (!state) return std::nullopt;
 
   // Iterate through all the modifiers.
-  for (xkb_mod_index_t mod = 0; mod < xkb_keymap_num_mods(ctx->xkb_keymap); mod++) {
+  for (xkb_mod_index_t mod = 0;
+       mod < xkb_keymap_num_mods(ctx->xkb_keymap) &&
+       mod < sizeof(xkb_mod_mask_t) * CHAR_BIT; mod++) {
     // Build a mask consisting of just this modifier key.
-    xkb_mod_mask_t mask = 1 << mod;
+    xkb_mod_mask_t mask = xkb_mod_mask_t{1} << mod;
     const char *mod_name = xkb_keymap_mod_get_name(ctx->xkb_keymap, mod);
-    xkb_state_update_mask(state, mask, 0, 0, 0, 0, 0);
+    xkb_state_update_mask(state, mask, 0, 0, 0, 0, ctx->group);
 
     bool activates_level3 = false;
     int level3_keys_count = 0;
@@ -47,9 +47,7 @@ static std::optional<size_t> IndexOfLevel3Modifier(WaylandKeymapContext* ctx) {
         continue;
       }
 
-      // By observation, index 0 is always the active layout, at least for
-      // GNOME; we hope it's universally true.
-      xkb_layout_index_t active_layout = 0;
+      xkb_layout_index_t active_layout = ctx->group;
       xkb_level_index_t level = xkb_state_key_get_level(state, keycode, active_layout);
 
       // Levels are zero-indexed, so “2” is what we expect here.
@@ -78,16 +76,18 @@ static std::optional<size_t> IndexOfLevel3Modifier(WaylandKeymapContext* ctx) {
 // REGISTRY LISTENER
 // =================
 
+static void AddSeatListener(KeyboardLayoutManager *that);
+
 static void registry_global(void *data, struct wl_registry *registry,
                             uint32_t name, const char *interface,
                             uint32_t version) {
   auto that = (static_cast<KeyboardLayoutManager *>(data));
   auto ctx = that->waylandContext;
-  if (strcmp(interface, "wl_seat") == 0) {
+  if (strcmp(interface, "wl_seat") == 0 && !ctx->seat) {
     ctx->seat = (struct wl_seat *)wl_registry_bind(registry, name,
                                                    &wl_seat_interface, 1);
     if (ctx->seat) {
-      ctx->keyboard = wl_seat_get_keyboard(ctx->seat);
+      AddSeatListener(that);
     }
   }
 }
@@ -109,42 +109,55 @@ static void keyboard_keymap(void *data, struct wl_keyboard *keyboard,
   auto that = (static_cast<KeyboardLayoutManager *>(data));
   auto ctx = that->waylandContext;
 
-  if (format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1) {
+  if (format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1 || size == 0) {
     close(fd);
     return;
   }
 
   char *keymap_string = (char *)mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
 
-#ifdef DEBUG
-  std::cout << "KEYMAP STRING:" << std::endl << keymap_string << std::endl;
-#endif
-
   if (keymap_string == MAP_FAILED) {
     close(fd);
     return;
   }
 
-  ctx->xkb_keymap = xkb_keymap_new_from_string(ctx->xkb_context, keymap_string,
-                                               XKB_KEYMAP_FORMAT_TEXT_V1,
-                                               XKB_KEYMAP_COMPILE_NO_FLAGS);
+  // The protocol includes a trailing NUL. Use the bounded API so a bad
+  // compositor cannot make the parser read beyond the mapped buffer.
+  size_t length = size;
+  if (keymap_string[length - 1] == '\0') --length;
+  auto keymap = xkb_keymap_new_from_buffer(ctx->xkb_context, keymap_string,
+                                         length, XKB_KEYMAP_FORMAT_TEXT_V1,
+                                         XKB_KEYMAP_COMPILE_NO_FLAGS);
 
   munmap(keymap_string, size);
   close(fd);
 
-  if (!ctx->xkb_keymap)
+  if (!keymap)
     return;
 
-  ctx->xkb_state = xkb_state_new(ctx->xkb_keymap);
+  auto state = xkb_state_new(keymap);
 
-  if (!ctx->xkb_state)
+  if (!state) {
+    xkb_keymap_unref(keymap);
     return;
+  }
+
+  // A compositor can replace its keymap repeatedly. Keep the last valid
+  // generation until the replacement has compiled successfully.
+  if (ctx->xkb_state) xkb_state_unref(ctx->xkb_state);
+  if (ctx->xkb_keymap) xkb_keymap_unref(ctx->xkb_keymap);
+  ctx->xkb_keymap = keymap;
+  ctx->xkb_state = state;
+  ctx->group = 0;
+  ctx->shift_mask = 0;
+  ctx->alt_gr_mask = 0;
 
   // Get shift mask
   xkb_mod_index_t shift_idx =
       xkb_keymap_mod_get_index(ctx->xkb_keymap, XKB_MOD_NAME_SHIFT);
-  if (shift_idx != XKB_MOD_INVALID) {
-    ctx->shift_mask = 1 << shift_idx;
+  if (shift_idx != XKB_MOD_INVALID &&
+      shift_idx < sizeof(xkb_mod_mask_t) * CHAR_BIT) {
+    ctx->shift_mask = xkb_mod_mask_t{1} << shift_idx;
   }
 
   // It's surprisingly hard to find out which modifier key corresponds to
@@ -161,7 +174,7 @@ static void keyboard_keymap(void *data, struct wl_keyboard *keyboard,
 
   if (alt_gr_index_result.has_value()) {
     size_t alt_gr_index = *alt_gr_index_result;
-    ctx->alt_gr_mask = 1 << alt_gr_index;
+    ctx->alt_gr_mask = xkb_mod_mask_t{1} << alt_gr_index;
   } else {
     // If that approach fails, then we can try a more desperate approach in
     // which we pick the most likely names for the `AltGr` key and try each of
@@ -183,11 +196,11 @@ static void keyboard_keymap(void *data, struct wl_keyboard *keyboard,
     for (size_t i = 0; i < alt_gr_length; i++) {
       xkb_mod_index_t idx =
           xkb_keymap_mod_get_index(ctx->xkb_keymap, alt_gr_names[i]);
-      if (idx != XKB_MOD_INVALID) {
+      if (idx != XKB_MOD_INVALID && idx < sizeof(xkb_mod_mask_t) * CHAR_BIT) {
 #ifdef DEBUG
         std::cout << "Using AltGr name: " << alt_gr_names[i] << std::endl;
 #endif
-        ctx->alt_gr_mask = 1 << idx;
+        ctx->alt_gr_mask = xkb_mod_mask_t{1} << idx;
         break;
       }
     }
@@ -223,7 +236,22 @@ static void keyboard_modifiers(void *data, struct wl_keyboard *keyboard,
                                uint32_t serial, uint32_t mods_depressed,
                                uint32_t mods_latched, uint32_t mods_locked,
                                uint32_t group) {
-  // Not used
+  auto that = static_cast<KeyboardLayoutManager *>(data);
+  auto ctx = that->waylandContext;
+  if (!ctx->xkb_state) return;
+
+  auto changed = xkb_state_update_mask(ctx->xkb_state, mods_depressed,
+                                      mods_latched, mods_locked, 0, 0, group);
+  ctx->group = 0;
+  for (xkb_layout_index_t index = 0;
+       index < xkb_keymap_num_layouts(ctx->xkb_keymap); ++index) {
+    if (xkb_state_layout_index_is_active(ctx->xkb_state, index,
+                                         XKB_STATE_LAYOUT_EFFECTIVE) > 0) {
+      ctx->group = index;
+      break;
+    }
+  }
+  if (changed & XKB_STATE_LAYOUT_EFFECTIVE) that->OnNotificationReceived();
 }
 
 static void keyboard_repeat_info(void *data, struct wl_keyboard *keyboard,
@@ -234,6 +262,25 @@ static void keyboard_repeat_info(void *data, struct wl_keyboard *keyboard,
 static const struct wl_keyboard_listener keyboard_listener = {
     keyboard_keymap, keyboard_enter,     keyboard_leave,
     keyboard_key,    keyboard_modifiers, keyboard_repeat_info};
+
+static void seat_capabilities(void *data, struct wl_seat *seat,
+                              uint32_t capabilities) {
+  auto that = static_cast<KeyboardLayoutManager *>(data);
+  auto ctx = that->waylandContext;
+  if ((capabilities & WL_SEAT_CAPABILITY_KEYBOARD) && !ctx->keyboard) {
+    ctx->keyboard = wl_seat_get_keyboard(seat);
+    if (ctx->keyboard)
+      wl_keyboard_add_listener(ctx->keyboard, &keyboard_listener, that);
+  } else if (!(capabilities & WL_SEAT_CAPABILITY_KEYBOARD) && ctx->keyboard) {
+    wl_keyboard_destroy(ctx->keyboard);
+    ctx->keyboard = nullptr;
+  }
+}
+
+static void AddSeatListener(KeyboardLayoutManager *that) {
+  static const struct wl_seat_listener listener = {seat_capabilities, nullptr};
+  wl_seat_add_listener(that->waylandContext->seat, &listener, that);
+}
 
 static void CleanupWaylandContext(WaylandKeymapContext *ctx) {
   if (!ctx)
@@ -263,7 +310,6 @@ static void CleanupWaylandContext(WaylandKeymapContext *ctx) {
     ctx->registry = nullptr;
   }
   if (ctx->display) {
-    wl_display_roundtrip(ctx->display);
     wl_display_disconnect(ctx->display);
     ctx->display = nullptr;
   }
@@ -271,8 +317,9 @@ static void CleanupWaylandContext(WaylandKeymapContext *ctx) {
 
 // Given a Wayland context, a keycode, and a modifier mask, return the
 // character that would be produced by that keycode.
-static char *GetCharForKeycode(WaylandKeymapContext *ctx, uint32_t keycode,
-                               xkb_mod_mask_t modifiers) {
+static std::string GetCharForKeycode(WaylandKeymapContext *ctx, uint32_t keycode,
+                                     xkb_mod_mask_t modifiers) {
+  if (!ctx || !ctx->xkb_keymap) return {};
   // At first I thought we needed to offset this by 8, but it already seems
   // correct as-is.
   xkb_keycode_t xkb_keycode = keycode;
@@ -280,31 +327,25 @@ static char *GetCharForKeycode(WaylandKeymapContext *ctx, uint32_t keycode,
   // Create a copy of the XKB state so we can apply modifiers.
   struct xkb_state *temp_state = xkb_state_new(ctx->xkb_keymap);
   if (!temp_state) {
-    return strdup("error");
+    return {};
   }
 
-  xkb_state_update_mask(temp_state, modifiers, 0, 0, 0, 0, 0);
+  xkb_state_update_mask(temp_state, modifiers, 0, 0, 0, 0, ctx->group);
 
   xkb_keysym_t keysym = xkb_state_key_get_one_sym(temp_state, xkb_keycode);
 
-  // Allocate memory for the result.
-  char *result = new char[32];
+  char result[64] = {};
 
   // Try to get a UTF-8 representation.
-  int len = xkb_keysym_to_utf8(keysym, result, 32);
-
-  if (!result) {
-    xkb_state_unref(temp_state);
-    delete[] result;
-    return NULL;
-  }
+  int len = xkb_keysym_to_utf8(keysym, result, sizeof(result));
 
   // Convert keysym to UTF-8.
   if (keysym == XKB_KEY_NoSymbol) {
-    strcpy(result, "Dead");
+    result[0] = '\0';
   } else if (len <= 0) {
     // If we couldn't get a UTF-8 character, fall back to the keysym’s name.
-    xkb_keysym_get_name(keysym, result, 32);
+    if (xkb_keysym_get_name(keysym, result, sizeof(result)) < 0)
+      result[0] = '\0';
   }
 
   xkb_state_unref(temp_state);
@@ -315,42 +356,62 @@ static Napi::Value WaylandCharacterForCode(Napi::Env env,
                                            WaylandKeymapContext *ctx,
                                            uint32_t keycode,
                                            xkb_mod_mask_t modifiers) {
-  char *result = GetCharForKeycode(ctx, keycode, modifiers);
-  if (result) {
-    auto wrappedResult = Napi::String::New(env, result);
-    delete[] result;
-    return wrappedResult;
+  std::string result = GetCharForKeycode(ctx, keycode, modifiers);
+  if (!result.empty()) {
+    return Napi::String::New(env, result);
   } else {
     return env.Null();
   }
+}
+
+// Pair every prepared read with read_events or cancel_read, including timeouts
+// and disconnected compositors. This is shared by bounded setup and polling.
+static bool DispatchWaylandEvents(struct wl_display *display, int timeout,
+                                  std::mutex *mutex = nullptr) {
+  auto dispatchPending = [display, mutex]() {
+    if (mutex) {
+      std::lock_guard<std::mutex> lock(*mutex);
+      return wl_display_dispatch_pending(display);
+    }
+    return wl_display_dispatch_pending(display);
+  };
+  while (wl_display_prepare_read(display) != 0) {
+    if (dispatchPending() < 0) return false;
+  }
+
+  struct pollfd descriptor = {wl_display_get_fd(display), POLLIN, 0};
+  if (wl_display_flush(display) < 0) {
+    if (errno != EAGAIN) {
+      wl_display_cancel_read(display);
+      return false;
+    }
+    descriptor.events |= POLLOUT;
+  }
+
+  int status = poll(&descriptor, 1, timeout);
+  if (status < 0 || (descriptor.revents & (POLLERR | POLLHUP | POLLNVAL))) {
+    wl_display_cancel_read(display);
+    return status < 0 && errno == EINTR;
+  }
+  if (!(descriptor.revents & POLLIN)) {
+    wl_display_cancel_read(display);
+    return true;
+  }
+  if (wl_display_read_events(display) < 0) return false;
+  return dispatchPending() >= 0;
 }
 
 void KeyboardLayoutManager::SetupWaylandPolling() {
   if (!waylandContext || !waylandContext->display)
     return;
 
-  int fd = wl_display_get_fd(waylandContext->display);
-
   waylandPolling = true;
-  waylandPollThread = std::thread([this, fd]() {
-    struct pollfd descriptor = {fd, POLLIN, 0};
+  waylandPollThread = std::thread([this]() {
     while (waylandPolling) {
-      descriptor.revents = 0;
-      int status = poll(&descriptor, 1, 200);
-      if (!waylandPolling)
-        break;
-      if (status <= 0 || !(descriptor.revents & POLLIN))
-        continue;
-
-      std::lock_guard<std::mutex> lock(waylandMutex);
       if (!waylandContext || !waylandContext->display)
         break;
-      while (wl_display_prepare_read(waylandContext->display) != 0) {
-        wl_display_dispatch_pending(waylandContext->display);
-      }
-      if (wl_display_read_events(waylandContext->display) < 0)
-        continue;
-      wl_display_dispatch_pending(waylandContext->display);
+      if (!DispatchWaylandEvents(waylandContext->display, 200, &waylandMutex))
+        break;
     }
   });
 }
@@ -372,8 +433,7 @@ void KeyboardLayoutManager::PlatformSetup(const Napi::CallbackInfo &info) {
   // Wayland APIs.
   isWayland = true;
 
-  waylandContext = new WaylandKeymapContext();
-  memset(waylandContext, 0, sizeof(WaylandKeymapContext));
+  waylandContext = new WaylandKeymapContext{};
 
   waylandContext->display = wl_display_connect(NULL);
   if (!waylandContext->display) {
@@ -394,29 +454,24 @@ void KeyboardLayoutManager::PlatformSetup(const Napi::CallbackInfo &info) {
 
   // Set up registry listeners so that we can discover a seat and a keyboard.
   waylandContext->registry = wl_display_get_registry(waylandContext->display);
-  wl_registry_add_listener(waylandContext->registry, &registry_listener,
-                           this);
-
-  // Process registry events.
-  wl_display_roundtrip(waylandContext->display);
-
-  // If a seat was found, add a keyboard listener. This should trigger the
-  // sending of a `keymap` event that will allow us to get the data we want.
-  if (waylandContext->keyboard) {
-    wl_keyboard_add_listener(waylandContext->keyboard, &keyboard_listener,
-                             this);
-  } else {
+  if (!waylandContext->registry ||
+      wl_registry_add_listener(waylandContext->registry, &registry_listener,
+                               this) < 0) {
     CleanupWaylandContext(waylandContext);
     goto x11;
   }
 
-  // Wait for the keymap to be received.
-  //
-  // TODO: Timeout?
-  while (!waylandContext->keymap_received) {
-    if (wl_display_dispatch(waylandContext->display) < 0) {
-      CleanupWaylandContext(waylandContext);
-      goto x11;
+  // Registry, seat capabilities and keymap events can require several request
+  // batches. A compositor that never sends a usable map must not hang Node.
+  {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(2);
+    while (!waylandContext->keymap_received) {
+      if (std::chrono::steady_clock::now() >= deadline ||
+          !DispatchWaylandEvents(waylandContext->display, 100)) {
+        CleanupWaylandContext(waylandContext);
+        goto x11;
+      }
     }
   }
 
@@ -432,36 +487,6 @@ x11:
   isWayland = false;
   xDisplay = XOpenDisplay("");
   CHECK_VOID(xDisplay, "Could not connect to X display", env);
-
-  xInputMethod = XOpenIM(xDisplay, 0, 0, 0);
-  if (!xInputMethod)
-    return;
-
-  XIMStyles *styles = 0;
-  if (XGetIMValues(xInputMethod, XNQueryInputStyle, &styles, NULL) || !styles) {
-    return;
-  }
-
-  XIMStyle bestMatchStyle = 0;
-  for (int i = 0; i < styles->count_styles; i++) {
-    XIMStyle thisStyle = styles->supported_styles[i];
-    if (thisStyle == (XIMPreeditNothing | XIMStatusNothing)) {
-      bestMatchStyle = thisStyle;
-      break;
-    }
-  }
-  XFree(styles);
-  if (!bestMatchStyle)
-    return;
-
-  Window window;
-  int revert_to;
-  XGetInputFocus(xDisplay, &window, &revert_to);
-  if (window != BadRequest) {
-    xInputContext =
-        XCreateIC(xInputMethod, XNInputStyle, bestMatchStyle, XNClientWindow,
-                  window, XNFocusWindow, window, NULL);
-  }
 }
 
 void KeyboardLayoutManager::PlatformTeardown() {
@@ -471,14 +496,25 @@ void KeyboardLayoutManager::PlatformTeardown() {
   delete waylandContext;
   waylandContext = nullptr;
 #endif
-  callback.Reset();
+  if (xInputContext) {
+    XDestroyIC(xInputContext);
+    xInputContext = nullptr;
+  }
+  if (xInputMethod) {
+    XCloseIM(xInputMethod);
+    xInputMethod = nullptr;
+  }
+  if (xDisplay) {
+    XCloseDisplay(xDisplay);
+    xDisplay = nullptr;
+  }
 };
 
 Napi::Value KeyboardLayoutManager::GetCurrentKeyboardLayout(
     const Napi::CallbackInfo &info) {
   auto env = info.Env();
-  Napi::HandleScope scope(env);
-  Napi::Value result;
+  CHECK(!disposed.load(), "Keyboard layout manager has been disposed", env);
+  Napi::Value result = env.Null();
 
   if (isWayland) {
 #if HAS_WAYLAND
@@ -488,38 +524,35 @@ Napi::Value KeyboardLayoutManager::GetCurrentKeyboardLayout(
       return env.Null();
     }
 
-    // Based on lots of experimentation with Gnome/Wayland, the layout at index
-    // 0 will always be the active layout. This may or may not be true for
-    // other Wayland server implementations, but we'll go with it for now —
-    // because if it isn't true, we'd be hard-pressed to discover that
-    // information any other way.
     const char *layout_name =
-        xkb_keymap_layout_get_name(waylandContext->xkb_keymap, 0);
+        xkb_keymap_layout_get_name(waylandContext->xkb_keymap,
+                                   waylandContext->group);
 
 #ifdef DEBUG
     std::cout << "Current layout: " << layout_name << std::endl;
 #endif
-    result = Napi::String::New(env, layout_name);
+    if (layout_name) result = Napi::String::New(env, layout_name);
 #endif // HAS_WAYLAND
   } else {
     // X11
-    XkbRF_VarDefsRec vdr;
+    if (!xDisplay) return env.Null();
+    XkbRF_VarDefsRec vdr = {};
     char *tmp = NULL;
+    std::string layout;
     if (XkbRF_GetNamesProp(xDisplay, &tmp, &vdr) && vdr.layout) {
-      XkbStateRec xkbState;
-      XkbGetState(xDisplay, XkbUseCoreKbd, &xkbState);
-      if (vdr.variant) {
-        result = Napi::String::New(
-            env, std::string(vdr.layout) + "," + std::string(vdr.variant) +
-                     " [" + std::to_string(xkbState.group) + "]");
-      } else {
-        result =
-            Napi::String::New(env, std::string(vdr.layout) + " [" +
-                                       std::to_string(xkbState.group) + "]");
+      XkbStateRec xkbState = {};
+      if (XkbGetState(xDisplay, XkbUseCoreKbd, &xkbState) == Success) {
+        layout = vdr.layout;
+        if (vdr.variant) layout += "," + std::string(vdr.variant);
+        layout += " [" + std::to_string(xkbState.group) + "]";
       }
-    } else {
-      result = env.Null();
     }
+    free(tmp);
+    free(vdr.model);
+    free(vdr.layout);
+    free(vdr.variant);
+    free(vdr.options);
+    if (!layout.empty()) result = Napi::String::New(env, layout);
   }
   return result;
 }
@@ -534,7 +567,7 @@ Napi::Value KeyboardLayoutManager::GetCurrentKeyboardLanguage(
 Napi::Value KeyboardLayoutManager::GetInstalledKeyboardLanguages(
     const Napi::CallbackInfo &info) {
   auto env = info.Env();
-  Napi::HandleScope scope(env);
+  CHECK(!disposed.load(), "Keyboard layout manager has been disposed", env);
   return env.Undefined();
 }
 
@@ -550,47 +583,30 @@ struct KeycodeMapEntry {
 #include "keycode_converter_data.inc"
 
 
-Napi::Value CharacterForNativeCode(Napi::Env env, XIC xInputContext,
-                                   XKeyEvent *keyEvent, uint xkbKeycode,
+Napi::Value CharacterForNativeCode(Napi::Env env, XKeyEvent *keyEvent,
+                                   uint xkbKeycode,
                                    uint state) {
   keyEvent->keycode = xkbKeycode;
   keyEvent->state = state;
 
-  // We're keeping this code path around so that we can return to using it in
-  // certain scenarios if need be. But for now it's producing the wrong results
-  // in many cases.
-  if (USE_XIC) {
-    wchar_t characters[2];
-    char utf8[MB_CUR_MAX * 2 + 1];
-    int count =
-        XwcLookupString(xInputContext, keyEvent, characters, 2, NULL, NULL);
-    size_t len = wcstombs(utf8, characters, sizeof(utf8));
-    if (len == (size_t)-1) {
-      return env.Null();
-    }
+  // XLookupString returns ISO Latin-1 bytes, not UTF-8. Passing them to the
+  // UTF-8 overload corrupts accented characters such as e-acute.
+  char characters[2];
+  int count = XLookupString(keyEvent, characters, sizeof(characters), NULL, NULL);
+  if (count <= 0 ||
+      std::iscntrl(static_cast<unsigned char>(characters[0]))) return env.Null();
 
-    if (count > 0 && !std::iswcntrl(characters[0])) {
-      return Napi::String::New(env, std::string(utf8, len));
-    } else {
-      return env.Null();
-    }
-  } else {
-    // Graceful fallback for systems where no window is open or no input
-    // context can be found.
-    char characters[2];
-    int count = XLookupString(keyEvent, characters, 2, NULL, NULL);
-    if (count > 0 && !std::iscntrl(characters[0])) {
-      return Napi::String::New(env, std::string(characters, count));
-    } else {
-      return env.Null();
-    }
-  }
+  std::u16string unicode;
+  for (int i = 0; i < count; ++i)
+    unicode.push_back(static_cast<unsigned char>(characters[i]));
+  return Napi::String::New(env, unicode);
 }
 
 
 Napi::Value
 KeyboardLayoutManager::GetCurrentKeymap(const Napi::CallbackInfo &info) {
   auto env = info.Env();
+  CHECK(!disposed.load(), "Keyboard layout manager has been disposed", env);
   Napi::Object result = Napi::Object::New(env);
   Napi::String unmodifiedKey = Napi::String::New(env, "unmodified");
   Napi::String withShiftKey = Napi::String::New(env, "withShift");
@@ -602,6 +618,7 @@ KeyboardLayoutManager::GetCurrentKeymap(const Napi::CallbackInfo &info) {
 
 #if HAS_WAYLAND
     std::lock_guard<std::mutex> lock(waylandMutex);
+    if (!waylandContext || !waylandContext->xkb_keymap) return result;
     size_t keyCodeMapSize = sizeof(keyCodeMap) / sizeof(keyCodeMap[0]);
     for (size_t i = 0; i < keyCodeMapSize; i++) {
       const char *dom3Code = keyCodeMap[i].dom3Code;
@@ -632,19 +649,15 @@ KeyboardLayoutManager::GetCurrentKeymap(const Napi::CallbackInfo &info) {
 #endif // HAS_WAYLAND
 
   } else {
+    if (!xDisplay) return result;
     // Clear cached keymap.
     XMappingEvent eventMap = {MappingNotify,   0, false, xDisplay, 0,
                               MappingKeyboard, 0, 0};
     XRefreshKeyboardMapping(&eventMap);
 
-    XkbStateRec xkbState;
-    XkbGetState(xDisplay, XkbUseCoreKbd, &xkbState);
-    uint keyboardBaseState = 0x0000;
-    if (xkbState.group == 1) {
-      keyboardBaseState = 0x2000;
-    } else if (xkbState.group == 2) {
-      keyboardBaseState = 0x4000;
-    }
+    XkbStateRec xkbState = {};
+    if (XkbGetState(xDisplay, XkbUseCoreKbd, &xkbState) != Success) return result;
+    uint keyboardBaseState = XkbBuildCoreState(0, xkbState.group);
 
     // Set up an event to reuse across CharacterForNativeCode calls.
     XEvent event;
@@ -661,9 +674,9 @@ KeyboardLayoutManager::GetCurrentKeymap(const Napi::CallbackInfo &info) {
       if (dom3Code && xkbKeycode > 0x0000) {
         Napi::String dom3CodeKey = Napi::String::New(env, dom3Code);
         Napi::Value unmodified = CharacterForNativeCode(
-            env, xInputContext, keyEvent, xkbKeycode, keyboardBaseState);
+            env, keyEvent, xkbKeycode, keyboardBaseState);
         Napi::Value withShift =
-            CharacterForNativeCode(env, xInputContext, keyEvent, xkbKeycode,
+            CharacterForNativeCode(env, keyEvent, xkbKeycode,
                                    keyboardBaseState | ShiftMask);
 
         if (unmodified.IsString() || withShift.IsString()) {

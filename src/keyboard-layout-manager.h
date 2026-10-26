@@ -2,6 +2,7 @@
 #define SRC_KEYBORD_LAYOUT_OBSERVER_H_
 
 #include "napi.h"
+#include <atomic>
 
 #define CHECK(cond, msg, env)                                  \
 if (!(cond)) {                                                 \
@@ -51,6 +52,7 @@ typedef struct {
   xkb_mod_mask_t shift_mask;
   // The modifier mask for the `AltGr` key.
   xkb_mod_mask_t alt_gr_mask;
+  xkb_layout_index_t group = 0;
 } WaylandKeymapContext;
 #endif // HAS_WAYLAND
 
@@ -85,10 +87,12 @@ private:
   void PlatformTeardown();
 
   static void ProcessCallback(Napi::Env env, Napi::Function callback);
+  static void CleanupHook(void* data);
+  void Dispose(const Napi::CallbackInfo& info);
   void Cleanup();
 
 #if defined(__linux__) || defined(__FreeBSD__)
-  Display *xDisplay;
+  Display *xDisplay = nullptr;
   XIC xInputContext;
   XIM xInputMethod;
 
@@ -101,8 +105,8 @@ private:
 #endif // HAS_WAYLAND
 #endif // __linux__ || __FreeBSD__
 
-  bool isFinalizing = false;
-  Napi::FunctionReference callback;
+  std::atomic<bool> disposed{false};
+  bool cleanupHookRegistered = false;
   Napi::ThreadSafeFunction tsfn;
 };
 

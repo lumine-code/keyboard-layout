@@ -29,7 +29,7 @@ If you want to watch for layout changes, use `onDidChangeCurrentKeyboardLayout` 
 
 ```js
 const KeyboardLayout = require("@lumine-code/keyboard-layout");
-subscription = KeyboardLayout.observeCurrentKeyboardLayout((layout) => console.log(layout));
+const subscription = KeyboardLayout.observeCurrentKeyboardLayout((layout) => console.log(layout));
 subscription.dispose(); // to unsubscribe later
 ```
 
@@ -44,16 +44,22 @@ On a US layout, this returns:
   unmodified: 's',
   withShift: 'S',
   withAltGraph: 'ß',
-  withShiftAltGraph: 'Í'
+  withAltGraphShift: 'Í'
 }
 */
 ```
+
+Call `KeyboardLayout.dispose()` when the module is no longer needed to stop observation and release native resources. Disposal is idempotent; subsequent queries and subscriptions throw. Disposing an individual subscription only removes that observer.
 
 ## Caveats
 
 ### All platforms
 
 - Having an active layout change listener (via `onDidChangeCurrentKeyboardLayout` or `observeCurrentKeyboardLayout`) will not prevent the process from exiting.
+
+### Windows
+
+- Layout changes are checked every 100 milliseconds while at least one observer is subscribed. The timer stops when the last observer unsubscribes or the module is disposed.
 
 ### Linux
 

@@ -1,12 +1,48 @@
 #import <Cocoa/Cocoa.h>
-#import <dispatch/dispatch.h>
 
 #import <Carbon/Carbon.h>
 #import "keyboard-layout-manager.h"
 #include <vector>
-#include <string>
-#include <cctype>
-#include <iostream>
+
+namespace {
+
+class ScopedCFRelease {
+public:
+  explicit ScopedCFRelease(CFTypeRef value) : value(value) {}
+  ~ScopedCFRelease() {
+    if (value != nullptr) CFRelease(value);
+  }
+
+  ScopedCFRelease(const ScopedCFRelease&) = delete;
+  ScopedCFRelease& operator=(const ScopedCFRelease&) = delete;
+
+private:
+  CFTypeRef value;
+};
+
+CFStringRef FirstInputSourceLanguage(TISInputSourceRef source) {
+  if (source == nullptr) return nullptr;
+
+  CFArrayRef languages = static_cast<CFArrayRef>(
+    TISGetInputSourceProperty(source, kTISPropertyInputSourceLanguages));
+  if (languages == nullptr || CFArrayGetCount(languages) == 0) return nullptr;
+
+  return static_cast<CFStringRef>(CFArrayGetValueAtIndex(languages, 0));
+}
+
+Napi::Value StringFromCFString(Napi::Env env, CFStringRef value) {
+  if (value == nullptr) return env.Null();
+
+  CFIndex length = CFStringGetLength(value);
+  if (length == 0) return Napi::String::New(env, "");
+
+  std::vector<UniChar> characters(static_cast<size_t>(length));
+  CFStringGetCharacters(value, CFRangeMake(0, length), characters.data());
+  return Napi::String::New(env,
+    reinterpret_cast<const char16_t*>(characters.data()), characters.size());
+}
+
+} // namespace
 
 static void NotificationHandler(
   CFNotificationCenterRef center,
@@ -15,7 +51,6 @@ static void NotificationHandler(
   const void *object,
   CFDictionaryRef userInfo
 ) {
-  std::cout << "NotificationHandler" << std::endl;
   (static_cast<KeyboardLayoutManager *>(manager))->OnNotificationReceived();
 }
 
@@ -46,40 +81,33 @@ void KeyboardLayoutManager::PlatformSetup(const Napi::CallbackInfo& info) {
 
 Napi::Value KeyboardLayoutManager::GetInstalledKeyboardLanguages(const Napi::CallbackInfo& info) {
   auto env = info.Env();
-  Napi::HandleScope scope(env);
+  CHECK(!disposed.load(), "Keyboard layout manager has been disposed", env);
 
   @autoreleasepool {
-    std::vector<std::string> ret;
-
-    // NB: We have to do this whole rigamarole twice, once for IMEs (i.e.
-    // Japanese), and once for keyboard layouts (i.e. English).
-    NSDictionary* filter = @{ (__bridge NSString *) kTISPropertyInputSourceType : (__bridge NSString *) kTISTypeKeyboardLayout };
-    NSArray* keyboardLayouts = (NSArray *) TISCreateInputSourceList((__bridge CFDictionaryRef) filter, NO);
-
-    for (size_t i=0; i < keyboardLayouts.count; i++) {
-      TISInputSourceRef current = (TISInputSourceRef)[keyboardLayouts objectAtIndex:i];
-
-      NSArray* langs = (NSArray*) TISGetInputSourceProperty(current, kTISPropertyInputSourceLanguages);
-      std::string str = std::string([(NSString*)[langs objectAtIndex:0] UTF8String]);
-      ret.push_back(str);
-    }
-
-    filter = @{ (__bridge NSString *) kTISPropertyInputSourceType : (__bridge NSString *) kTISTypeKeyboardInputMode };
-    keyboardLayouts = (NSArray *) TISCreateInputSourceList((__bridge CFDictionaryRef) filter, NO);
-
-    for (size_t i=0; i < keyboardLayouts.count; i++) {
-      TISInputSourceRef current = (TISInputSourceRef)[keyboardLayouts objectAtIndex:i];
-
-      NSArray* langs = (NSArray*) TISGetInputSourceProperty(current, kTISPropertyInputSourceLanguages);
-      std::string str = std::string([(NSString*)[langs objectAtIndex:0] UTF8String]);
-      ret.push_back(str);
-    }
-
     auto result = Napi::Array::New(env);
+    uint32_t resultIndex = 0;
 
-    for (size_t i = 0; i < ret.size(); i++) {
-      const std::string& lang = ret[i];
-      result.Set(i, Napi::String::New(env, lang.data(), lang.size()));
+    // IMEs (for example Japanese) and keyboard layouts have separate types.
+    const CFStringRef inputSourceTypes[] = {
+      kTISTypeKeyboardLayout, kTISTypeKeyboardInputMode
+    };
+    for (CFStringRef inputSourceType : inputSourceTypes) {
+      NSDictionary* filter = @{
+        (__bridge NSString *) kTISPropertyInputSourceType :
+        (__bridge NSString *) inputSourceType
+      };
+      CFArrayRef sources = TISCreateInputSourceList((__bridge CFDictionaryRef) filter, NO);
+      ScopedCFRelease releaseSources(sources);
+      if (sources == nullptr) continue;
+
+      for (CFIndex i = 0; i < CFArrayGetCount(sources); i++) {
+        TISInputSourceRef source = static_cast<TISInputSourceRef>(
+          const_cast<void*>(CFArrayGetValueAtIndex(sources, i)));
+        CFStringRef language = FirstInputSourceLanguage(source);
+        if (language != nullptr) {
+          result.Set(resultIndex++, StringFromCFString(env, language));
+        }
+      }
     }
 
     return result;
@@ -88,19 +116,21 @@ Napi::Value KeyboardLayoutManager::GetInstalledKeyboardLanguages(const Napi::Cal
 
 Napi::Value KeyboardLayoutManager::GetCurrentKeyboardLanguage(const Napi::CallbackInfo& info) {
   auto env = info.Env();
+  CHECK(!disposed.load(), "Keyboard layout manager has been disposed", env);
   TISInputSourceRef source = TISCopyCurrentKeyboardInputSource();
-
-  NSArray* langs = (NSArray*) TISGetInputSourceProperty(source, kTISPropertyInputSourceLanguages);
-  NSString* lang = (NSString*) [langs objectAtIndex:0];
-
-  return Napi::String::New(env, [lang UTF8String]);
+  ScopedCFRelease releaseSource(source);
+  return StringFromCFString(env, FirstInputSourceLanguage(source));
 }
 
 Napi::Value KeyboardLayoutManager::GetCurrentKeyboardLayout(const Napi::CallbackInfo& info) {
   auto env = info.Env();
+  CHECK(!disposed.load(), "Keyboard layout manager has been disposed", env);
   TISInputSourceRef source = TISCopyCurrentKeyboardInputSource();
+  ScopedCFRelease releaseSource(source);
+  if (source == nullptr) return env.Null();
+
   CFStringRef sourceId = (CFStringRef) TISGetInputSourceProperty(source, kTISPropertyInputSourceID);
-  return Napi::String::New(env, [(NSString *)sourceId UTF8String]);
+  return StringFromCFString(env, sourceId);
 }
 
 struct KeycodeMapEntry {
@@ -119,10 +149,11 @@ Napi::Value CharacterForNativeCode(
   UInt16 virtualKeyCode,
   EventModifiers modifiers
 ) {
-  // See https://developer.apple.com/reference/coreservices/1390584-uckeytranslate?language=objc
+  // See https://developer.apple.com/documentation/coreservices/1390584-uckeytranslate
   UInt32 modifierKeyState = (modifiers >> 8) & 0xFF;
   UInt32 deadKeyState = 0;
-  UniChar characters[4] = {0, 0, 0, 0};
+  // UCKeyTranslate supports sequences of up to 255 UTF-16 code units.
+  UniChar characters[255] = {};
   UniCharCount charCount = 0;
   OSStatus status = UCKeyTranslate(
       keyboardLayout,
@@ -130,29 +161,15 @@ Napi::Value CharacterForNativeCode(
       kUCKeyActionDown,
       modifierKeyState,
       LMGetKbdLast(),
-      kUCKeyTranslateNoDeadKeysBit,
+      kUCKeyTranslateNoDeadKeysMask,
       &deadKeyState,
       sizeof(characters) / sizeof(characters[0]),
       &charCount,
       characters);
 
-  // If the previous key was dead, translate again with the same dead key
-  // state to get a printable character.
-  if (status == noErr && deadKeyState != 0) {
-    status = UCKeyTranslate(
-        keyboardLayout,
-        static_cast<UInt16>(virtualKeyCode),
-        kUCKeyActionDown,
-        modifierKeyState,
-        LMGetKbdLast(),
-        kUCKeyTranslateNoDeadKeysBit,
-        &deadKeyState,
-        sizeof(characters) / sizeof(characters[0]),
-        &charCount,
-        characters);
-  }
-
-  if (status == noErr && !std::iscntrl(characters[0])) {
+  // std::iscntrl only accepts byte values; passing a Unicode character is UB.
+  if (status == noErr && charCount != 0 &&
+      characters[0] >= 0x20 && characters[0] != 0x7f) {
     return Napi::String::New(env, reinterpret_cast<const char16_t*>(characters), static_cast<size_t>(charCount));
   } else {
     return env.Null();
@@ -161,11 +178,14 @@ Napi::Value CharacterForNativeCode(
 
 Napi::Value KeyboardLayoutManager::GetCurrentKeymap(const Napi::CallbackInfo& info) {
   auto env = info.Env();
-  std::cout << "GetCurrentKeymap" << std::endl;
+  CHECK(!disposed.load(), "Keyboard layout manager has been disposed", env);
   TISInputSourceRef source = TISCopyCurrentKeyboardLayoutInputSource();
+  ScopedCFRelease releaseSource(source);
+  if (source == nullptr) return env.Null();
+
   CFDataRef layoutData = static_cast<CFDataRef>(TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData));
 
-  if (layoutData == NULL) return env.Null();
+  if (layoutData == nullptr || CFDataGetLength(layoutData) == 0) return env.Null();
 
   const UCKeyboardLayout* keyboardLayout = reinterpret_cast<const UCKeyboardLayout*>(CFDataGetBytePtr(layoutData));
   auto result = Napi::Object::New(env);
@@ -189,8 +209,6 @@ Napi::Value KeyboardLayoutManager::GetCurrentKeymap(const Napi::CallbackInfo& in
         entry.Set("withAltGraph", withAltGraph);
         entry.Set("withAltGraphShift", withAltGraphShift);
         result.Set(dom3CodeKey, entry);
-
-        // Nan::Set(result, dom3CodeKey, entry);
       }
     }
   }

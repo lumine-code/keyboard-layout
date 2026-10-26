@@ -8,7 +8,7 @@
       # process. The graceful path in Error::ThrowAsJavaScriptException needs
       # NODE_API_SWALLOW_UNTHROWABLE_EXCEPTIONS *and* NAPI_VERSION >= 10, since
       # below 10 it expects napi_pending_exception instead of napi_cannot_run_js
-      # and never matches. napi_build_version is 10 on Node 22+ and Electron 43.
+      # and never matches. Use the Node-API version supplied by the target runtime.
       "defines": [
         "NAPI_VERSION=<(napi_build_version)",
         "NODE_API_SWALLOW_UNTHROWABLE_EXCEPTIONS",
@@ -18,7 +18,6 @@
       "xcode_settings": {
         "GCC_ENABLE_CPP_EXCEPTIONS": "YES",
         "CLANG_CXX_LIBRARY": "libc++",
-        "MACOSX_DEPLOYMENT_TARGET": "10.7",
       },
       "msvs_settings": {
         "VCCLCompilerTool": {"ExceptionHandling": 1},
@@ -71,16 +70,16 @@
           ],
           "cflags_cc": ["-std=c++17"],
           "variables": {
-            "wayland_available%": "<!(pkg-config --exists wayland-client && echo 1 || echo 0)"
+            "wayland_available%": "<!(pkg-config --exists wayland-client xkbcommon && echo 1 || echo 0)"
           },
           "conditions": [
             ["wayland_available==1", {
+              "cflags": ["<!@(pkg-config --cflags wayland-client xkbcommon)"],
               "link_settings": {
                 "libraries": [
                   "-lX11",
                   "-lxkbfile",
-                  "-lxkbcommon",
-                  "-lwayland-client"
+                  "<!@(pkg-config --libs wayland-client xkbcommon)"
                 ]
               },
               "defines": ["HAS_WAYLAND=1"]
@@ -99,6 +98,8 @@
           "sources": [
             "src/keyboard-layout-manager-linux.cc",
           ],
+          "cflags_cc": ["-std=c++17"],
+          "defines": ["HAS_WAYLAND=0"],
           "include_dirs": [
             "<!(node -p \"require('node-addon-api').include_dir\")",
             "/usr/local/include", "/usr/local/include/X11",
