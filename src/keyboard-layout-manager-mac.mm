@@ -2,9 +2,14 @@
 
 #import <Carbon/Carbon.h>
 #import "keyboard-layout-manager.h"
+#include <mutex>
 #include <vector>
 
 namespace {
+
+// Text Input Sources shares process-wide state across Node environments.
+// Serialize initialization and reads when several workers load the addon.
+std::mutex inputSourceMutex;
 
 class ScopedCFRelease {
 public:
@@ -82,6 +87,7 @@ void KeyboardLayoutManager::PlatformSetup(const Napi::CallbackInfo& info) {
 Napi::Value KeyboardLayoutManager::GetInstalledKeyboardLanguages(const Napi::CallbackInfo& info) {
   auto env = info.Env();
   CHECK(!disposed.load(), "Keyboard layout manager has been disposed", env);
+  std::lock_guard<std::mutex> lock(inputSourceMutex);
 
   @autoreleasepool {
     auto result = Napi::Array::New(env);
@@ -117,6 +123,7 @@ Napi::Value KeyboardLayoutManager::GetInstalledKeyboardLanguages(const Napi::Cal
 Napi::Value KeyboardLayoutManager::GetCurrentKeyboardLanguage(const Napi::CallbackInfo& info) {
   auto env = info.Env();
   CHECK(!disposed.load(), "Keyboard layout manager has been disposed", env);
+  std::lock_guard<std::mutex> lock(inputSourceMutex);
   TISInputSourceRef source = TISCopyCurrentKeyboardInputSource();
   ScopedCFRelease releaseSource(source);
   return StringFromCFString(env, FirstInputSourceLanguage(source));
@@ -125,6 +132,7 @@ Napi::Value KeyboardLayoutManager::GetCurrentKeyboardLanguage(const Napi::Callba
 Napi::Value KeyboardLayoutManager::GetCurrentKeyboardLayout(const Napi::CallbackInfo& info) {
   auto env = info.Env();
   CHECK(!disposed.load(), "Keyboard layout manager has been disposed", env);
+  std::lock_guard<std::mutex> lock(inputSourceMutex);
   TISInputSourceRef source = TISCopyCurrentKeyboardInputSource();
   ScopedCFRelease releaseSource(source);
   if (source == nullptr) return env.Null();
@@ -179,6 +187,7 @@ Napi::Value CharacterForNativeCode(
 Napi::Value KeyboardLayoutManager::GetCurrentKeymap(const Napi::CallbackInfo& info) {
   auto env = info.Env();
   CHECK(!disposed.load(), "Keyboard layout manager has been disposed", env);
+  std::lock_guard<std::mutex> lock(inputSourceMutex);
   TISInputSourceRef source = TISCopyCurrentKeyboardLayoutInputSource();
   ScopedCFRelease releaseSource(source);
   if (source == nullptr) return env.Null();
