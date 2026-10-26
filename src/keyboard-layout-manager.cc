@@ -1,16 +1,11 @@
 #include "keyboard-layout-manager.h"
-#include <iostream>
 #ifdef DEBUG
+#include <iostream>
 #endif
 
 KeyboardLayoutManager::KeyboardLayoutManager(const Napi::CallbackInfo& info):
  Napi::ObjectWrap<KeyboardLayoutManager>(info),
  _env(info.Env()) {
-  #if defined(__linux__) || defined(__FreeBSD__)
-    xInputContext = nullptr;
-    xInputMethod = nullptr;
-  #endif
-
   auto env = info.Env();
   CHECK_VOID(
     info[0].IsFunction(),
@@ -38,20 +33,12 @@ KeyboardLayoutManager::KeyboardLayoutManager(const Napi::CallbackInfo& info):
   PlatformSetup(info);
 }
 
-// Runs on the main thread.
-void KeyboardLayoutManager::ProcessCallback(
-  Napi::Env env,
-  Napi::Function callback
-) {
-  callback.Call({});
-}
-
 // Runs on a background thread.
 void KeyboardLayoutManager::OnNotificationReceived() {
   // We don't need to send any arguments; we just need to signal the main
   // thread.
   if (!disposed.load()) {
-    tsfn.NonBlockingCall(KeyboardLayoutManager::ProcessCallback);
+    tsfn.NonBlockingCall();
   }
 }
 

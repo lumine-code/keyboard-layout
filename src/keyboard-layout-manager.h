@@ -31,7 +31,6 @@ if (!(cond)) {                                                 \
 #include <string>
 
 #if HAS_WAYLAND
-#include <atomic>
 #include <mutex>
 #include <thread>
 #include <wayland-client.h>
@@ -68,7 +67,6 @@ public:
 
   Napi::Env _env;
 #if defined(__linux__) || defined(__FreeBSD__)
-  void ProcessCallbackWrapper();
   bool isWayland = false;
 
 #if HAS_WAYLAND
@@ -86,15 +84,12 @@ private:
   void PlatformSetup(const Napi::CallbackInfo& info);
   void PlatformTeardown();
 
-  static void ProcessCallback(Napi::Env env, Napi::Function callback);
   static void CleanupHook(void* data);
   void Dispose(const Napi::CallbackInfo& info);
   void Cleanup();
 
 #if defined(__linux__) || defined(__FreeBSD__)
   Display *xDisplay = nullptr;
-  XIC xInputContext;
-  XIM xInputMethod;
 
 #if HAS_WAYLAND
   std::atomic<bool> waylandPolling{false};

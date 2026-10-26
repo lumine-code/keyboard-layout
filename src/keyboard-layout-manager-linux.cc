@@ -496,14 +496,6 @@ void KeyboardLayoutManager::PlatformTeardown() {
   delete waylandContext;
   waylandContext = nullptr;
 #endif
-  if (xInputContext) {
-    XDestroyIC(xInputContext);
-    xInputContext = nullptr;
-  }
-  if (xInputMethod) {
-    XCloseIM(xInputMethod);
-    xInputMethod = nullptr;
-  }
   if (xDisplay) {
     XCloseDisplay(xDisplay);
     xDisplay = nullptr;
