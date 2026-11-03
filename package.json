@@ -26,17 +26,28 @@
     "access": "public"
   },
   "dependencies": {
-    "@lumine-code/event-kit": "github:lumine-code/event-kit#8407113c3dc00c5a560592ffe263276af7f021e2",
+    "@lumine-code/event-kit": "github:lumine-code/event-kit#37749e435ed189578608d71bb4a072af3fb31211",
     "node-addon-api": "^8.9.2"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "eslint": "^10.13.0",
+    "eslint": "^10.14.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-n": "^18.5.0",
-    "globals": "^17.13.0",
+    "globals": "^17.14.0",
     "jasmine": "^7.0.0",
     "node-gyp": "13.1.0",
     "prettier": "^3.9.10"
+  },
+  "overrides": {
+    "eslint@^10.14.0": {
+      "minimatch": "11.0.4"
+    },
+    "@eslint/config-array@0.23.5": {
+      "minimatch": "11.0.4"
+    },
+    "jasmine@^7.0.0": {
+      "glob": "14.0.3"
+    }
   }
 }
